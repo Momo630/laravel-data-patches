@@ -5,6 +5,7 @@ namespace Momo630\LaravelDataPatches\Support;
 use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Support\Facades\DB;
 use Momo630\LaravelDataPatches\Contracts\DataPatch;
+use Momo630\LaravelDataPatches\Contracts\RequiresDataFiles;
 use Momo630\LaravelDataPatches\Models\DataPatchApplication;
 use RuntimeException;
 
@@ -15,6 +16,17 @@ class DataPatchRunner
         [$name, $description] = $this->metadata($patch);
         if (DataPatchApplication::query()->whereKey($name)->exists()) {
             throw new RuntimeException("Data patch {$name} has already been recorded.");
+        }
+
+        if ($patch instanceof RequiresDataFiles) {
+            foreach ($patch->requiredFiles() as $file) {
+                if (! is_string($file) || $file === '' || ! preg_match('~^(?:/|[A-Za-z]:[\\\\/]|\\\\\\\\)~', $file)) {
+                    throw new RuntimeException("Data patch {$name} declares an invalid required file path: ".var_export($file, true).'.');
+                }
+                if (! is_file($file) || ! is_readable($file)) {
+                    throw new RuntimeException("Data patch {$name} requires a readable file: {$file}.");
+                }
+            }
         }
 
         if ($dryRun) {
