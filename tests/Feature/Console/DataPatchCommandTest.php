@@ -56,6 +56,35 @@ class DataPatchCommandTest extends TestCase
             ->assertFailed();
     }
 
+    public function test_missing_required_file_returns_failure_with_patch_name_and_full_path(): void
+    {
+        $this->addFixture('MissingFilesPatch', <<<'PHP'
+use Momo630\LaravelDataPatches\Contracts\RequiresDataFiles;
+use Momo630\LaravelDataPatches\Support\HasDataPatchFiles;
+
+class MissingFilesPatch implements RequiresDataFiles
+{
+    use HasDataPatchFiles;
+
+    public const NAME = 'missing-files-patch';
+    public const DESCRIPTION = 'missing files patch';
+    protected const DATA_DIRECTORY = 'missing-files-patch';
+
+    public function requiredFiles(): array { return [$this->dataPath('source.json')]; }
+    public function preview(): array { throw new \LogicException('Preview must not run.'); }
+    public function apply(): array { throw new \LogicException('Apply must not run.'); }
+}
+PHP);
+
+        foreach (['--dry-run ', ''] as $options) {
+            $this->artisan('app:data-patch missing-files-patch '.$options.'--no-interaction')
+                ->expectsOutputToContain('Data patch missing-files-patch requires a readable file: '.storage_path('app/private/data-patches/missing-files-patch/source.json').'.')
+                ->assertFailed();
+        }
+
+        $this->assertDatabaseCount('data_patch_applications', 0);
+    }
+
     public function test_production_requires_force_and_force_does_not_bypass_history(): void
     {
         $this->addPatchFixture('RecordedPatch', 'recorded-patch', 'recorded patch');

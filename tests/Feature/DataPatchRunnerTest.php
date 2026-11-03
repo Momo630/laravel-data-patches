@@ -5,8 +5,10 @@ namespace Tests\Feature;
 use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Momo630\LaravelDataPatches\Contracts\DataPatch;
+use Momo630\LaravelDataPatches\Contracts\RequiresDataFiles;
 use Momo630\LaravelDataPatches\Models\DataPatchApplication;
 use Momo630\LaravelDataPatches\Support\DataPatchRunner;
+use Momo630\LaravelDataPatches\Support\HasDataPatchFiles;
 use PDOException;
 use RuntimeException;
 use Tests\TestCase;
@@ -37,6 +39,77 @@ class DataPatchRunnerTest extends TestCase
         $this->assertSame(1, $patch->applies);
         $this->assertSame($history, DataPatchApplication::query()->get()->map->getAttributes()->all());
         $this->assertDatabaseHas('data_patch_applications', ['patch_id' => $patch::NAME, 'outcome' => 'applied']);
+    }
+
+    public function test_missing_required_file_blocks_preview_and_apply_without_writes(): void
+    {
+        $patch = new RequiredFileRunnerTestPatch;
+        $this->assertSame([storage_path('app/private/data-patches/required-files-test/source.json')], $patch->requiredFiles());
+
+        foreach ([true, false] as $dryRun) {
+            $this->assertThrows(fn () => app(DataPatchRunner::class)->run($patch, $dryRun), RuntimeException::class);
+        }
+
+        $this->assertSame(0, $patch->previews);
+        $this->assertSame(0, $patch->applies);
+        $this->assertDatabaseCount('data_patch_applications', 0);
+    }
+
+    public function test_readable_required_files_allow_preview_and_apply_without_automatic_preview(): void
+    {
+        $file = tempnam(sys_get_temp_dir(), 'data-patch-');
+        try {
+            $patch = new RequiredFileRunnerTestPatch([$file]);
+            $runner = app(DataPatchRunner::class);
+
+            $this->assertSame('dry_run', $runner->run($patch, true)['outcome']);
+            $this->assertSame(0, $patch->applies);
+            $this->assertDatabaseCount('data_patch_applications', 0);
+            $this->assertSame('applied', $runner->run($patch)['outcome']);
+            $this->assertSame(1, $patch->previews);
+            $this->assertSame(1, $patch->applies);
+            $this->assertDatabaseHas('data_patch_applications', ['patch_id' => $patch::NAME, 'outcome' => 'applied']);
+        } finally {
+            unlink($file);
+        }
+    }
+
+    public function test_invalid_required_file_paths_are_rejected_without_callbacks_or_ledger(): void
+    {
+        foreach (['', 'source.json', 42] as $file) {
+            $patch = new RequiredFileRunnerTestPatch([$file]);
+
+            $this->assertThrows(fn () => app(DataPatchRunner::class)->run($patch), RuntimeException::class);
+            $this->assertSame(0, $patch->previews);
+            $this->assertSame(0, $patch->applies);
+        }
+
+        $this->assertDatabaseCount('data_patch_applications', 0);
+    }
+
+    public function test_required_file_cannot_be_a_directory(): void
+    {
+        $patch = new RequiredFileRunnerTestPatch([sys_get_temp_dir()]);
+
+        $this->assertThrows(fn () => app(DataPatchRunner::class)->run($patch), RuntimeException::class);
+
+        $this->assertSame(0, $patch->applies);
+        $this->assertDatabaseCount('data_patch_applications', 0);
+    }
+
+    public function test_recorded_patch_does_not_check_required_files(): void
+    {
+        $patch = new RequiredFileRunnerTestPatch;
+        DataPatchApplication::query()->create(['patch_id' => $patch::NAME, 'description' => $patch::DESCRIPTION, 'outcome' => 'applied', 'recorded_at' => now('UTC')]);
+
+        foreach ([true, false] as $dryRun) {
+            $this->assertThrows(fn () => app(DataPatchRunner::class)->run($patch, $dryRun), RuntimeException::class);
+        }
+
+        $this->assertSame(0, $patch->fileChecks);
+        $this->assertSame(0, $patch->previews);
+        $this->assertSame(0, $patch->applies);
+        $this->assertDatabaseCount('data_patch_applications', 1);
     }
 
     public function test_recorded_patch_blocks_dry_run_without_previewing(): void
@@ -125,6 +198,46 @@ class DataPatchRunnerTest extends TestCase
         $this->expectExceptionMessage("Duplicate entry 'runner-test' for key 'PRIMARY'");
 
         app(DataPatchRunner::class)->run($patch);
+    }
+}
+
+final class RequiredFileRunnerTestPatch implements RequiresDataFiles
+{
+    use HasDataPatchFiles;
+
+    public const NAME = 'required-files-test';
+
+    public const DESCRIPTION = 'required files test';
+
+    protected const DATA_DIRECTORY = 'required-files-test';
+
+    public int $fileChecks = 0;
+
+    public int $previews = 0;
+
+    public int $applies = 0;
+
+    public function __construct(private ?array $files = null) {}
+
+    public function requiredFiles(): array
+    {
+        $this->fileChecks++;
+
+        return $this->files ?? [$this->dataPath('source.json')];
+    }
+
+    public function preview(): array
+    {
+        $this->previews++;
+
+        return [];
+    }
+
+    public function apply(): array
+    {
+        $this->applies++;
+
+        return [];
     }
 }
 
