@@ -150,6 +150,47 @@ Run `php artisan migrate` after updating the package. The new, separate `2026_11
 
 A recorded patch is always blocked before storage I/O. For recorded S3 metadata, the runner also compares current declarations, disk and bucket against the ledger, ignoring declaration order. It reports added, removed or changed paths without downloading objects, running callbacks, or changing history. Legacy rows with `input_files = null` retain their existing recorded-patch guard; the runner does not invent provenance for them.
 
+## Upload reviewed S3 inputs
+
+`app:data-patch:upload` is a separate, explicit preparation command for `RequiresS3DataFiles` patches. It reuses the configured patch directory, namespace, `s3_disk`, full object keys, and reviewed SHA-256 declarations above. It never calls `preview()`, `apply()`, the patch runner, or the execution ledger. Uploading does not run a patch and must not be added to routine deployment or patch execution.
+
+Keep source files editable while preparing and reviewing them. Once reviewed, calculate each SHA-256 and commit the expected values with the patch. The upload command checks the supplied bytes against those pins; it never updates the declarations or substitutes a hash obtained from S3. Changing source bytes after pinning requires another review and an updated committed pin.
+
+For a patch declaring one input, pass either that regular file (its filename may differ) or a source directory. For multiple declared inputs, pass a directory containing their exact declared relative paths:
+
+```sh
+php artisan app:data-patch:upload import-products /secure/reviewed-products.csv --dry-run
+php artisan app:data-patch:upload import-products /secure/reviewed-products.csv
+
+# Example directory layout: /secure/import/source/products.csv and /secure/import/assets/photo.jpg
+php artisan app:data-patch:upload import-products /secure/import --dry-run
+```
+
+The command copies only declared inputs into private temporary snapshots and verifies every local hash before any S3 access. It rejects missing files, symlinks (including source arguments and their ancestor directories), escaped paths, and conflicting destination declarations; directory extras are ignored. Snapshots isolate uploads from subsequent edits to the original sources and are removed on success and failure. Each input must fit a single S3 PUT (at most 5 GiB); multipart uploads are not used.
+
+The host application must install its normal optional S3 stack (`league/flysystem-aws-s3-v3:^3.0`), including an AWS SDK whose `PutObject` model supports `IfNoneMatch`. The command reuses the configured Laravel `AwsS3V3Adapter` client, endpoint and credentials, and sends the declared bucket-relative keys without duplicating the disk root. Configured S3 `options`, including server-side encryption settings, are forwarded; unsupported or reserved request options fail instead of being bypassed. Read-only disks and public visibility/ACL settings cannot be used for uploads.
+
+**Writes are disabled by default.** Before enabling them, verify conditional creation against a disposable bucket on the same backend deployment and configuration. Use the actual SDK and adapter configuration: create a unique test key with `PutObject` and `IfNoneMatch = '*'`, then attempt different bytes at the same key with the same condition. The second request must fail with HTTP 412 and a streamed GET must still return the first bytes. Also race two different conditional creations of a fresh key: at most one may succeed (the other may return 412 or 409), and a GET must match the successful bytes. Verify the emitted header, but do not treat the header or the SDK's API model alone as evidence that the backend enforces it. Some older S3-compatible deployments ignore this header and overwrite objects; they must remain disabled. Reverify after backend or target changes.
+
+Only after that integration check passes, attest the exact disk, bucket, and actual SDK endpoint in `config/data-patches.php`:
+
+```php
+return [
+    's3_disk' => 'patch-inputs',
+    's3_upload_verified_target' => [
+        'disk' => 'patch-inputs',
+        'bucket' => 'private-inputs',
+        'endpoint' => 'https://s3.example.com',
+    ],
+];
+```
+
+Obtain the endpoint from `(string) Storage::disk('patch-inputs')->getClient()->getEndpoint()` and omit a trailing slash. This setting is an operator attestation of backend behavior, not an automatic capability probe. Leave it `null` when enforcement is unavailable or uncertain; there is no unconditional write or overwrite fallback.
+
+Before any writes, the command streams and hashes every existing destination. Exact bytes are `unchanged`; different bytes fail the whole preflight without overwriting anything. A missing object is created only with a single conditional `PutObject`. A competing HTTP 412 is accepted only after a new streamed GET verifies identical bytes; a different object, HTTP 409, authorization error, missing bucket, or uncertain write outcome aborts safely. `--dry-run` performs the current local/remote preflight and reports `would_upload` or `unchanged`, without writing objects or requiring the verification attestation. It is not a reservation of the destination.
+
+A batch can partially succeed if a later conditional write fails. There is no deletion or rollback of uploaded objects. Rerun the same command and reviewed inputs: matching objects are skipped, still-missing objects can be created, and conflicts remain failures. Previewing or applying the patch remains a separate, deliberate `app:data-patch` invocation with its existing guards.
+
 ## Releases
 
 Keep `CHANGELOG.md` updated and tag releases using Semantic Versioning. Breaking changes to the patch contract, command, or ledger semantics require a major version; use minor versions for backward-compatible features and patch versions for fixes.
