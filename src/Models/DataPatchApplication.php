@@ -19,6 +19,7 @@ class DataPatchApplication extends Model
         'description',
         'outcome',
         'result',
+        'input_files',
         'applied_at',
         'recorded_at',
     ];
@@ -27,6 +28,7 @@ class DataPatchApplication extends Model
     {
         return [
             'result' => 'array',
+            'input_files' => 'array',
             'applied_at' => 'datetime',
             'recorded_at' => 'datetime',
         ];
